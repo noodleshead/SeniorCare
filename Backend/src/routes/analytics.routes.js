@@ -14,5 +14,9 @@ const staffOrAbove = authorizeRoles(ROLES.BARANGAY_STAFF, ROLES.ADMIN, ROLES.LGU
 router.get("/barangays", authenticate, staffOrAbove, analyticsController.getBarangays);
 router.get("/summary", authenticate, staffOrAbove, analyticsController.getSummary);
 router.get("/map", authenticate, staffOrAbove, analyticsController.getMapMarkers);
+// Phase 8 — LGU report exports. Same role set as the rest of this router
+// (Staff/Admin/LGU-OSCA); server-side-scoped exactly like /summary.
+router.get("/export/barangay-comparison.csv", authenticate, staffOrAbove, analyticsController.exportBarangayComparisonCsv);
+router.get("/export/workflow.csv", authenticate, staffOrAbove, analyticsController.exportWorkflowCsv);
 
 export default router;

@@ -140,5 +140,9 @@ export const ROLE_DASHBOARD_ROUTES = {
   GUARDIAN: "/guardian/dashboard",
   BARANGAY_STAFF: "/barangay/dashboard",
   ADMIN: "/admin/dashboard",
-  LGU_OSCA: "/lgu/dashboard",
+  // Phase 8: LGU-OSCA lands on the multi-barangay analytics dashboard.
+  // The registration verification queue previously used as its home is
+  // unchanged and still reachable at /lgu/dashboard via the sidebar's
+  // "Senior Verification" item.
+  LGU_OSCA: "/senior-analytics",
 };

@@ -4,7 +4,18 @@ import Barangay from "../models/Barangay.js";
 import Pension from "../models/Pension.js";
 import PensionClaim from "../models/PensionClaim.js";
 import BenefitApplication from "../models/BenefitApplication.js";
-import { ACCOUNT_STATUS, PENSION_STATUS, CLAIM_STATUS, APPLICATION_STATUS } from "../utils/constants.js";
+import {
+  ACCOUNT_STATUS,
+  PENSION_STATUS,
+  CLAIM_STATUS,
+  APPLICATION_STATUS,
+  ILLNESS_CLASSIFICATION,
+  ILLNESS_PRIORITY,
+  HOME_VISIT_STATUS,
+  BARANGAY_VERIFICATION_STATUS,
+  HOME_VISIT_EXECUTION_STATUS,
+  BARANGAY_ENDORSEMENT_DECISION,
+} from "../utils/constants.js";
 import { hasBroadBarangayAccess } from "../utils/barangayScope.js";
 
 /**
@@ -137,7 +148,7 @@ function activeSeniorPipeline(scope, dateRange) {
  * Admin System Reports' own senior/demographic/pension/application
  * sections. `dateRange` is optional and unused by the first two callers.
  */
-export async function getSeniorAnalytics(requestingUser, { barangayId, dateRange } = {}) {
+export async function getSeniorAnalytics(requestingUser, { barangayId, dateRange, pensionMonth, pensionYear } = {}) {
   const scope = resolveScope(requestingUser, barangayId);
   const pipeline = activeSeniorPipeline(scope, dateRange);
 
@@ -149,7 +160,22 @@ export async function getSeniorAnalytics(requestingUser, { barangayId, dateRange
     ageGroups: AGE_BUCKETS.map((b) => ({ label: b.label, count: 0 })),
     pension: { totalBeneficiaries: 0, active: 0, inactive: 0, claims: { scheduled: 0, claimed: 0, missed: 0, cancelled: 0 } },
     applications: Object.values(APPLICATION_STATUS).map((status) => ({ status, count: 0 })),
-    priority: { available: false, note: "No priority classification exists on Senior records yet." },
+    // Phase 8 — these are now real, aggregate-only figures (Phase 5/6
+    // added the underlying Senior fields this reads). No individual
+    // Senior/illness/remark is ever included here — only counts, per
+    // this module's own privacy requirement (Step 9).
+    medical: {
+      totalWithCondition: 0,
+      classification: { CRITICAL: 0, NON_CRITICAL: 0, unclassified: 0 },
+      priority: { HIGH: 0, NORMAL: 0, unclassified: 0 },
+      homeVisitRequired: { REQUIRED: 0, NOT_REQUIRED: 0, PENDING_DECISION: 0 },
+      homeVisitExecution: { COMPLETED: 0, PENDING: 0, FOLLOW_UP_REQUIRED: 0, UNABLE_TO_VERIFY: 0 },
+    },
+    workflow: {
+      barangayVerification: { PENDING: 0, VERIFIED: 0, REVISION_REQUIRED: 0, REJECTED: 0 },
+      endorsement: { ENDORSED: 0, NOT_ENDORSED: 0, pending: 0 },
+      readyForOscaReview: 0,
+    },
     byBarangay: [],
   };
 
@@ -164,6 +190,39 @@ export async function getSeniorAnalytics(requestingUser, { barangayId, dateRange
           byGender: [{ $group: { _id: "$sex", count: { $sum: 1 } } }],
           byBedridden: [{ $group: { _id: "$bedridden", count: { $sum: 1 } } }],
           byAgeGroup: [{ $group: { _id: ageBucketSwitch(), count: { $sum: 1 } } }],
+          // Phase 8 — aggregate-only medical/workflow counts, computed in
+          // this same pass over the active-Senior population rather than
+          // separate queries (Step 14/25: avoid repeated aggregations).
+          medicalTotals: [
+            {
+              $group: {
+                _id: null,
+                totalWithCondition: { $sum: { $cond: ["$hasMedicalCondition", 1, 0] } },
+                classCritical: { $sum: { $cond: [{ $eq: ["$medicalClassification", ILLNESS_CLASSIFICATION.CRITICAL] }, 1, 0] } },
+                classNonCritical: { $sum: { $cond: [{ $eq: ["$medicalClassification", ILLNESS_CLASSIFICATION.NON_CRITICAL] }, 1, 0] } },
+                priorityHigh: { $sum: { $cond: [{ $eq: ["$medicalPriorityLevel", ILLNESS_PRIORITY.HIGH] }, 1, 0] } },
+                priorityNormal: { $sum: { $cond: [{ $eq: ["$medicalPriorityLevel", ILLNESS_PRIORITY.NORMAL] }, 1, 0] } },
+                hvRequired: { $sum: { $cond: [{ $eq: ["$homeVisitStatus", HOME_VISIT_STATUS.REQUIRED] }, 1, 0] } },
+                hvNotRequired: { $sum: { $cond: [{ $eq: ["$homeVisitStatus", HOME_VISIT_STATUS.NOT_REQUIRED] }, 1, 0] } },
+                hvPendingDecision: { $sum: { $cond: [{ $eq: ["$homeVisitStatus", HOME_VISIT_STATUS.PENDING_DECISION] }, 1, 0] } },
+                hvExecCompleted: { $sum: { $cond: [{ $eq: ["$barangayReview.homeVisit.status", HOME_VISIT_EXECUTION_STATUS.COMPLETED] }, 1, 0] } },
+                hvExecPending: { $sum: { $cond: [{ $eq: ["$barangayReview.homeVisit.status", HOME_VISIT_EXECUTION_STATUS.PENDING] }, 1, 0] } },
+                hvExecFollowUp: { $sum: { $cond: [{ $eq: ["$barangayReview.homeVisit.status", HOME_VISIT_EXECUTION_STATUS.FOLLOW_UP_REQUIRED] }, 1, 0] } },
+                hvExecUnable: { $sum: { $cond: [{ $eq: ["$barangayReview.homeVisit.status", HOME_VISIT_EXECUTION_STATUS.UNABLE_TO_VERIFY] }, 1, 0] } },
+                bvPending: {
+                  $sum: {
+                    $cond: [{ $in: ["$barangayReview.verificationStatus", [null, BARANGAY_VERIFICATION_STATUS.PENDING]] }, 1, 0],
+                  },
+                },
+                bvVerified: { $sum: { $cond: [{ $eq: ["$barangayReview.verificationStatus", BARANGAY_VERIFICATION_STATUS.VERIFIED] }, 1, 0] } },
+                bvRevision: { $sum: { $cond: [{ $eq: ["$barangayReview.verificationStatus", BARANGAY_VERIFICATION_STATUS.REVISION_REQUIRED] }, 1, 0] } },
+                bvRejected: { $sum: { $cond: [{ $eq: ["$barangayReview.verificationStatus", BARANGAY_VERIFICATION_STATUS.REJECTED] }, 1, 0] } },
+                endorsed: { $sum: { $cond: [{ $eq: ["$barangayReview.endorsement.decision", BARANGAY_ENDORSEMENT_DECISION.ENDORSED] }, 1, 0] } },
+                notEndorsed: { $sum: { $cond: [{ $eq: ["$barangayReview.endorsement.decision", BARANGAY_ENDORSEMENT_DECISION.NOT_ENDORSED] }, 1, 0] } },
+                readyForOsca: { $sum: { $cond: ["$barangayReview.readyForOscaReview", 1, 0] } },
+              },
+            },
+          ],
           byBarangay:
             scope.mode === "all"
               ? [
@@ -172,6 +231,12 @@ export async function getSeniorAnalytics(requestingUser, { barangayId, dateRange
                       _id: "$barangayId",
                       seniors: { $sum: 1 },
                       bedridden: { $sum: { $cond: ["$bedridden", 1, 0] } },
+                      homeVisitsRequired: { $sum: { $cond: [{ $eq: ["$homeVisitStatus", HOME_VISIT_STATUS.REQUIRED] }, 1, 0] } },
+                      homeVisitsCompleted: { $sum: { $cond: [{ $eq: ["$barangayReview.homeVisit.status", HOME_VISIT_EXECUTION_STATUS.COMPLETED] }, 1, 0] } },
+                      pendingBarangayVerification: {
+                        $sum: { $cond: [{ $in: ["$barangayReview.verificationStatus", [null, BARANGAY_VERIFICATION_STATUS.PENDING]] }, 1, 0] },
+                      },
+                      endorsed: { $sum: { $cond: [{ $eq: ["$barangayReview.endorsement.decision", BARANGAY_ENDORSEMENT_DECISION.ENDORSED] }, 1, 0] } },
                     },
                   },
                 ]
@@ -186,7 +251,8 @@ export async function getSeniorAnalytics(requestingUser, { barangayId, dateRange
     scope.mode === "single" ? Barangay.findById(scope.barangayIds[0]).select("name municipality province") : null,
   ]);
 
-  const facet = facetResult[0] || { total: [], byGender: [], byBedridden: [], byAgeGroup: [], byBarangay: [] };
+  const facet = facetResult[0] || { total: [], byGender: [], byBedridden: [], byAgeGroup: [], medicalTotals: [], byBarangay: [] };
+  const m = facet.medicalTotals[0] || {};
   const totalSeniors = facet.total[0]?.count || 0;
   const male = facet.byGender.find((g) => g._id === "Male")?.count || 0;
   const female = facet.byGender.find((g) => g._id === "Female")?.count || 0;
@@ -200,7 +266,7 @@ export async function getSeniorAnalytics(requestingUser, { barangayId, dateRange
 
   const activeSeniorIds = activeSeniorDocs.map((s) => s._id);
   const [pensionStats, applicationStats] = await Promise.all([
-    getPensionAnalytics(activeSeniorIds, scope),
+    getPensionAnalytics(activeSeniorIds, scope, { month: pensionMonth, year: pensionYear }),
     getApplicationAnalytics(activeSeniorIds, scope),
   ]);
 
@@ -237,6 +303,11 @@ export async function getSeniorAnalytics(requestingUser, { barangayId, dateRange
           bedridden: row.bedridden,
           pensionBeneficiaries: pensionCountByBarangay.get(key) || 0,
           activeApplications: applicationCountByBarangay.get(key) || 0,
+          // Phase 8 additions — Step 7's barangay-comparison columns.
+          homeVisitsRequired: row.homeVisitsRequired,
+          homeVisitsCompleted: row.homeVisitsCompleted,
+          pendingBarangayVerification: row.pendingBarangayVerification,
+          endorsed: row.endorsed,
         };
       })
       .sort((a, b) => a.name.localeCompare(b.name));
@@ -257,17 +328,47 @@ export async function getSeniorAnalytics(requestingUser, { barangayId, dateRange
     ageGroups,
     pension: pensionStats,
     applications: applicationStats,
-    // No Senior/Barangay record anywhere in the system currently stores a
-    // priority/high-priority classification — see CONCERN_PRIORITY in
-    // constants.js, which classifies individual Concerns, not Seniors.
-    // Inventing one here would not reflect real data, so this section is
-    // explicitly reported as unavailable rather than fabricated.
-    priority: { available: false, note: "No priority classification exists on Senior records yet." },
+    // Phase 8 — real aggregate figures, sourced from Phase 5's
+    // medicalClassification/medicalPriorityLevel/homeVisitStatus and
+    // Phase 6's barangayReview, all on Senior. "unclassified" counts
+    // Seniors who declared a condition but whose Admin medical review
+    // (Phase 5) hasn't set a final classification/priority yet — not an
+    // error, just not yet reviewed. Nothing here is a per-Senior value;
+    // only totals ever leave this function.
+    medical: {
+      totalWithCondition: m.totalWithCondition || 0,
+      classification: {
+        CRITICAL: m.classCritical || 0,
+        NON_CRITICAL: m.classNonCritical || 0,
+        unclassified: (m.totalWithCondition || 0) - (m.classCritical || 0) - (m.classNonCritical || 0),
+      },
+      priority: {
+        HIGH: m.priorityHigh || 0,
+        NORMAL: m.priorityNormal || 0,
+        unclassified: (m.totalWithCondition || 0) - (m.priorityHigh || 0) - (m.priorityNormal || 0),
+      },
+      homeVisitRequired: { REQUIRED: m.hvRequired || 0, NOT_REQUIRED: m.hvNotRequired || 0, PENDING_DECISION: m.hvPendingDecision || 0 },
+      homeVisitExecution: {
+        COMPLETED: m.hvExecCompleted || 0,
+        PENDING: m.hvExecPending || 0,
+        FOLLOW_UP_REQUIRED: m.hvExecFollowUp || 0,
+        UNABLE_TO_VERIFY: m.hvExecUnable || 0,
+      },
+    },
+    workflow: {
+      barangayVerification: { PENDING: m.bvPending || 0, VERIFIED: m.bvVerified || 0, REVISION_REQUIRED: m.bvRevision || 0, REJECTED: m.bvRejected || 0 },
+      endorsement: {
+        ENDORSED: m.endorsed || 0,
+        NOT_ENDORSED: m.notEndorsed || 0,
+        pending: (m.bvVerified || 0) - (m.endorsed || 0) - (m.notEndorsed || 0),
+      },
+      readyForOscaReview: m.readyForOsca || 0,
+    },
     byBarangay,
   };
 }
 
-async function getPensionAnalytics(activeSeniorIds, scope) {
+async function getPensionAnalytics(activeSeniorIds, scope, { month, year } = {}) {
   if (activeSeniorIds.length === 0) {
     return { totalBeneficiaries: 0, active: 0, inactive: 0, claims: { scheduled: 0, claimed: 0, missed: 0, cancelled: 0 } };
   }
@@ -276,6 +377,18 @@ async function getPensionAnalytics(activeSeniorIds, scope) {
   if (scope.mode === "single") {
     pensionMatch.barangayId = new mongoose.Types.ObjectId(scope.barangayIds[0]);
     claimMatch.barangayId = new mongoose.Types.ObjectId(scope.barangayIds[0]);
+  }
+  // Phase 8 — optional month/year filter on the claim's own scheduled
+  // date (PensionClaim.scheduledDate), per Step 4/12. Pension *beneficiary*
+  // counts (byStatus) are a current-state snapshot and intentionally not
+  // date-filtered — only claim-event counts are, since those are the only
+  // pension records with a meaningful date to filter by.
+  if (year) {
+    const y = Number(year);
+    const mo = month ? Number(month) - 1 : null;
+    const start = mo !== null ? new Date(y, mo, 1) : new Date(y, 0, 1);
+    const end = mo !== null ? new Date(y, mo + 1, 1) : new Date(y + 1, 0, 1);
+    claimMatch.scheduledDate = { $gte: start, $lt: end };
   }
 
   const [byStatus, byClaimStatus] = await Promise.all([

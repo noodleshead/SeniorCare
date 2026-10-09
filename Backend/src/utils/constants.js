@@ -379,6 +379,10 @@ export const AUDIT_ACTIONS = Object.freeze({
   OSCA_APPLICATION_APPROVED: "OSCA_APPLICATION_APPROVED",
   OSCA_APPLICATION_REJECTED: "OSCA_APPLICATION_REJECTED",
   OSCA_REVISION_REQUESTED: "OSCA_REVISION_REQUESTED",
+  // Phase 8 — report export only (Step 19: dashboard *viewing* is not
+  // audited; exporting a file is, same convention adminReports.controller.js
+  // already uses for its own CSV exports).
+  LGU_REPORT_EXPORTED: "LGU_REPORT_EXPORTED",
 });
 
 export const AUDIT_MODULES = Object.freeze({
